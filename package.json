@@ -1,0 +1,8 @@
+{
+  "name": "gretex-billing",
+  "version": "1.0.0",
+  "description": "Gretex Billing & Invoice System",
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

@@ -3341,7 +3341,7 @@ const Dashboard = {
 const SubmitInvoice = {
 
   selectedFile: null,
-  APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbybJBvh412l4I32UmZVums6KiX16ckQiYHppHF0-FEwlqDF-tpyMFms0BQy7kzysX04/exec",
+  APPS_SCRIPT_URL: "/api/submit-invoice",
   
 
   init() {
@@ -3615,7 +3615,7 @@ async submitForm() {
       const response = await fetch(SubmitInvoice.APPS_SCRIPT_URL, {
         method: "POST",
         headers: {
-          "Content-Type": "text/plain;charset=utf-8"
+          "Content-Type": "application/json"
         },
         body: JSON.stringify(payload),
         redirect: "follow"

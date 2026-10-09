@@ -18,9 +18,12 @@ const API = {
 
       // Guard: do not send unauthenticated requests that guarantee a 401
       if (!token && action !== "login" && action !== "ping") {
-        console.warn(`[API] No token available for action: ${action}. Redirecting to login.`);
-        Auth.clearSession();
-        window.location.href = "index.html";
+        console.warn(`[API] No token available for action: ${action}.`);
+        const isLoginPage = window.location.pathname.endsWith("index.html") || window.location.pathname === "/";
+        if (!isLoginPage) {
+          Auth.clearSession();
+          window.location.href = "index.html";
+        }
         return null;
       }
 
@@ -41,12 +44,32 @@ const API = {
 
       if (!data.success) {
         if (data.code === 401) {
-          Auth.clearSession();
-          window.location.href = "index.html";
+          // Do not kick user out on background sync or analytics actions
+          const backgroundActions = [
+            "getDashboardStats", "getBillerStats", "getQueueStats",
+            "getSummaryReport", "getSystemVersion", "getInvoices", "ping"
+          ];
+          if (backgroundActions.includes(action)) {
+            console.warn(`[API] 401 on background action '${action}'. Skipping auto-logout.`);
+            return null;
+          }
+
+          // Require multiple consecutive 401s on active user actions before logging out
+          API._consecutive401 = (API._consecutive401 || 0) + 1;
+          if (API._consecutive401 >= 3) {
+            console.warn(`[API] Multiple consecutive 401 errors received. Logging out.`);
+            API._consecutive401 = 0;
+            Auth.clearSession();
+            window.location.href = "index.html";
+          } else {
+            console.warn(`[API] Transient 401 on '${action}' (${API._consecutive401}/3). Retaining session.`);
+          }
           return null;
         }
+        API._consecutive401 = 0;
         throw new Error(data.message || "Request failed");
       }
+      API._consecutive401 = 0;
 
       // 🔄 Globally reverse queue arrays so newest (last row in sheet) is always first
       if (data.data && Array.isArray(data.data.queue)) {
@@ -402,7 +425,10 @@ const Auth = {
 
   requireAuth() {
     if (!Auth.isLoggedIn()) {
-      window.location.href = "index.html";
+      const isLoginPage = window.location.pathname.endsWith("index.html") || window.location.pathname === "/";
+      if (!isLoginPage) {
+        window.location.href = "index.html";
+      }
       return false;
     }
     return true;
@@ -413,9 +439,20 @@ const Auth = {
     const rawRole = Auth.getRole() || "";
     const cleanRole = rawRole.toLowerCase().replace(/[\s_-]/g, "");
     const cleanAllowed = allowedRoles.map(r => r.toLowerCase().replace(/[\s_-]/g, ""));
+
+    // SuperAdmin has master permissions across all dashboards
+    if (cleanRole === "superadmin") {
+      return true;
+    }
+
     if (!cleanAllowed.includes(cleanRole)) {
       console.warn(`[Auth] Role '${rawRole}' is not allowed for this page. Required:`, allowedRoles);
-      window.location.href = "index.html";
+      const user = Auth.getUser();
+      const userDashboard = (user && user.dashboard) ? user.dashboard : (cleanRole + ".html");
+      // Gracefully redirect to their own dashboard instead of logging out
+      if (!window.location.pathname.endsWith(userDashboard)) {
+        window.location.href = userDashboard;
+      }
       return false;
     }
     return true;
@@ -861,26 +898,31 @@ function generateTrackingTimeline(inv) {
 // ============================================================
 const SyncEngine = {
   currentVersion: null,
-  pollIntervalMs: 30000, // 30 seconds interval
+  pollIntervalMs: 60000, // 60 seconds interval
   timer: null,
   listeners: [],
   isChecking: false,
   isRefreshing: false,
+  _lastCheck: 0,
+  _dirty: false,
 
   init() {
     if (!Auth.isLoggedIn()) return;
     if (this.timer) clearInterval(this.timer);
 
-    // Initial silent version check after 4 seconds of load
-    setTimeout(() => this.check(), 4000);
+    // Initial silent version check after 6 seconds of load
+    setTimeout(() => this.check(), 6000);
 
-    // Periodic heartbeat check
+    // Periodic heartbeat check (60s)
     this.timer = setInterval(() => this.check(), this.pollIntervalMs);
 
-    // When user switches back to this tab, check immediately
+    // When user switches back to this tab, check only if >45s elapsed
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && Auth.isLoggedIn()) {
-        this.check();
+        const now = Date.now();
+        if (now - this._lastCheck > 45000) {
+          this.check();
+        }
       }
     });
   },
@@ -893,27 +935,26 @@ const SyncEngine = {
 
   notifyLocalWrite() {
     // When current user performs an action (approve, reject, upload, edit),
-    // mark version dirty so next check/refresh runs immediately
-    this.currentVersion = null;
-    setTimeout(() => this.check(), 1200);
+    // mark dirty so next sync runs cleanly
+    this._dirty = true;
+    setTimeout(() => this.check(), 2000);
   },
 
   async check() {
     if (!Auth.isLoggedIn() || this.isChecking || this.isRefreshing) return;
     if (document.hidden) return; // Save resources when tab is hidden
 
+    const now = Date.now();
+    if (now - this._lastCheck < 45000 && !this._dirty) return;
+    this._lastCheck = now;
+
     this.isChecking = true;
     try {
-      const res = await API.system.getVersion();
-      if (res && res.success && res.data && res.data.version) {
-        const newVer = String(res.data.version);
-        if (this.currentVersion === null) {
-          this.currentVersion = newVer;
-        } else if (this.currentVersion !== newVer) {
-          console.log(`[SyncEngine] Data version updated: ${this.currentVersion} -> ${newVer}. Refreshing silently...`);
-          this.currentVersion = newVer;
-          await this.triggerSync(newVer);
-        }
+      // Use silent ping instead of crashing on non-existent getSystemVersion
+      const res = await API.silentRequest("ping");
+      if (res && res.success && this._dirty) {
+        this._dirty = false;
+        await this.triggerSync("write-update");
       }
     } catch (err) {
       console.warn("[SyncEngine] Check skipped:", err.message);
@@ -961,27 +1002,24 @@ const SyncEngine = {
   async defaultPageRefresh() {
     if (typeof Dashboard === "undefined") return;
 
-    // Refresh KPI / Stats
-    if (typeof Dashboard.loadDashboardData === "function") {
-      await Dashboard.loadDashboardData();
-    } else if (typeof Dashboard.loadStats === "function") {
-      await Dashboard.loadStats();
-    }
-
-    // Refresh Recent Bills (Biller)
-    if (typeof Dashboard.loadRecentBills === "function") {
-      await Dashboard.loadRecentBills();
-    }
-
-    // Refresh Queue only if the queue section is active (silent mode = true)
+    // Refresh ONLY the currently active section to avoid concurrent lockups
     const approveSec = document.getElementById("sec-approve") || document.getElementById("sec-approval");
     if (approveSec && approveSec.style.display !== "none" && typeof Dashboard.loadApprovalQueue === "function") {
       await Dashboard.loadApprovalQueue(true);
+      return;
     }
 
     const queueSec = document.getElementById("sec-queue");
     if (queueSec && queueSec.style.display !== "none" && typeof Dashboard.loadQueue === "function") {
       await Dashboard.loadQueue(true);
+      return;
+    }
+
+    // Refresh KPI / Stats
+    if (typeof Dashboard.loadDashboardData === "function") {
+      await Dashboard.loadDashboardData();
+    } else if (typeof Dashboard.loadStats === "function") {
+      await Dashboard.loadStats();
     }
   },
 

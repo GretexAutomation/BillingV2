@@ -38,7 +38,7 @@ function getGoogleAuth() {
 }
 
 // ─────────────────────────────────────────────
-// 2. Gemini Multi-Key Failover
+// 2. Gemini Multi-Key & Multi-Model Failover
 // ─────────────────────────────────────────────
 function getGeminiApiKeys() {
   const raw = process.env.GEMINI_API_KEY || "";
@@ -48,40 +48,45 @@ function getGeminiApiKeys() {
     .filter((k) => k.length > 0);
 }
 
+// Available active models
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-flash-latest",
+  "gemini-2.5-flash-lite",
+  "gemini-flash-lite-latest",
+  "gemini-1.5-flash"
+];
+
 async function callGeminiWithFailover(parts) {
   const apiKeys = getGeminiApiKeys();
   if (apiKeys.length === 0) {
     throw new Error("No GEMINI_API_KEY configured in Environment Variables.");
   }
 
-  const MAX_ROUNDS = 2;
   let lastError = null;
 
-  for (let round = 0; round < MAX_ROUNDS; round++) {
+  for (const model of GEMINI_MODELS) {
     for (let i = 0; i < apiKeys.length; i++) {
       const apiKey = apiKeys[i];
       try {
-        console.log(`[Gemini] Attempting with Key index ${i} (Round ${round + 1})...`);
-        const result = await callGeminiAPI(parts, apiKey);
+        console.log(`[Gemini] Trying model: ${model} with key index: ${i}`);
+        const result = await callGeminiAPI(parts, apiKey, model);
         return result;
       } catch (err) {
         lastError = err.message;
-        console.warn(`[Gemini] Key index ${i} failed: ${err.message}`);
-        // If rate limited or quota exceeded, continue to next key
-        await new Promise((r) => setTimeout(r, 1000));
+        console.warn(`[Gemini] Model ${model} (Key ${i}) failed: ${err.message}`);
+        // If 404 model not found, don't retry with same model, break to next model
+        if (err.message.includes("404") || err.message.includes("no longer available")) {
+          break;
+        }
       }
-    }
-    if (round < MAX_ROUNDS - 1) {
-      await new Promise((r) => setTimeout(r, 3000));
     }
   }
 
-  throw new Error(`All Gemini API keys exhausted. Last error: ${lastError}`);
+  throw new Error(`All Gemini models/keys exhausted. Last error: ${lastError}`);
 }
 
-async function callGeminiAPI(parts, apiKey) {
-  // Try 2.0 Flash or 1.5 Flash
-  const model = "gemini-2.0-flash";
+async function callGeminiAPI(parts, apiKey, model) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const payload = {
@@ -204,9 +209,7 @@ async function uploadToDrive(auth, fileBuffer, fileName, fileType) {
   stream.push(fileBuffer);
   stream.push(null);
 
-  const requestBody = {
-    name: fileName,
-  };
+  const requestBody = { name: fileName };
   if (folderId) {
     requestBody.parents = [folderId];
   }
@@ -234,7 +237,6 @@ async function appendToSheet(auth, ai, driveUrl, senderEmail, fileName) {
 
   const sheets = google.sheets({ version: "v4", auth });
 
-  // Format date time: DD-MM-YYYY HH:mm:ss
   const now = new Date();
   const d = String(now.getDate()).padStart(2, "0");
   const m = String(now.getMonth() + 1).padStart(2, "0");
@@ -283,7 +285,6 @@ async function appendToSheet(auth, ai, driveUrl, senderEmail, fileName) {
 // 6. Main Serverless Handler
 // ─────────────────────────────────────────────
 export default async function handler(req, res) {
-  // CORS Headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -320,22 +321,18 @@ export default async function handler(req, res) {
     const fileBuffer = Buffer.from(pureBase64, "base64");
 
     // 2. Authenticate Google Client
-    console.log("Authenticating with Google Service Account...");
     const auth = getGoogleAuth();
 
     // 3. Upload File to Google Drive
-    console.log(`Uploading ${fileName} to Google Drive...`);
     let driveUrl = "";
     try {
       driveUrl = await uploadToDrive(auth, fileBuffer, fileName, fileType || "application/pdf");
-      console.log(`Uploaded to Drive: ${driveUrl}`);
     } catch (driveErr) {
       console.warn("Drive upload warning:", driveErr.message);
       driveUrl = "Drive Upload Failed: " + driveErr.message;
     }
 
-    // 4. Call Gemini AI with Failover
-    console.log("Analyzing invoice with Gemini AI...");
+    // 4. Call Gemini AI with Multi-Model & Multi-Key Failover
     const prompt = getGeminiPrompt({ receivedFrom, notes });
     const parts = [
       { text: prompt },
@@ -348,13 +345,11 @@ export default async function handler(req, res) {
     ];
 
     const aiData = await callGeminiWithFailover(parts);
-    console.log("Gemini extraction complete:", aiData.A13, aiData.A14);
 
     // 5. Append Row to Google Sheets ('Invoices' tab)
-    console.log("Appending row to Google Sheets...");
     await appendToSheet(auth, aiData, driveUrl, billerEmail || senderName || "Manual Upload", fileName);
 
-    // 6. Return Success Response
+    // 6. Return Clean Success Response
     return res.status(200).json({
       success: true,
       message: "Invoice successfully processed and recorded!",

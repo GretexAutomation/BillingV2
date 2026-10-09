@@ -16,14 +16,34 @@ export const config = {
 };
 
 // ─────────────────────────────────────────────
+// Helper: Clean Google IDs (extract ID if full URL or quotes pasted)
+// ─────────────────────────────────────────────
+function cleanGoogleId(raw, type = "sheet") {
+  if (!raw) return "";
+  let str = String(raw).trim().replace(/^["']|["']$/g, "").trim();
+  if (type === "sheet") {
+    const match = str.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (match) return match[1];
+  } else if (type === "folder") {
+    const match = str.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+    if (match) return match[1];
+  }
+  return str;
+}
+
+// ─────────────────────────────────────────────
 // 1. Google Auth Helper (Service Account)
 // ─────────────────────────────────────────────
 function getGoogleAuth() {
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const clientEmail = (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "").trim().replace(/^["']|["']$/g, "");
   let privateKey = process.env.GOOGLE_PRIVATE_KEY || "";
   
   // Fix escaped newlines if passed from env
-  privateKey = privateKey.replace(/\\n/g, "\n");
+  privateKey = privateKey.replace(/^["']|["']$/g, "").replace(/\\n/g, "\n");
+
+  if (!clientEmail || !privateKey) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY is missing in Vercel.");
+  }
 
   return new google.auth.GoogleAuth({
     credentials: {
@@ -44,11 +64,10 @@ function getGeminiApiKeys() {
   const raw = process.env.GEMINI_API_KEY || "";
   return raw
     .split(",")
-    .map((k) => k.trim())
+    .map((k) => k.trim().replace(/^["']|["']$/g, ""))
     .filter((k) => k.length > 0);
 }
 
-// Available active models
 const GEMINI_MODELS = [
   "gemini-2.5-flash",
   "gemini-flash-latest",
@@ -75,9 +94,8 @@ async function callGeminiWithFailover(parts) {
       } catch (err) {
         lastError = err.message;
         console.warn(`[Gemini] Model ${model} (Key ${i}) failed: ${err.message}`);
-        // If 404 model not found, don't retry with same model, break to next model
         if (err.message.includes("404") || err.message.includes("no longer available")) {
-          break;
+          break; // move to next model immediately
         }
       }
     }
@@ -202,7 +220,7 @@ IMPORTANT: For A10, A7, B3, C3 (GST/PAN numbers), return ONLY alphanumeric chara
 // 4. Save to Google Drive
 // ─────────────────────────────────────────────
 async function uploadToDrive(auth, fileBuffer, fileName, fileType) {
-  const folderId = process.env.UPLOAD_FOLDER_ID;
+  const folderId = cleanGoogleId(process.env.UPLOAD_FOLDER_ID, "folder");
   const drive = google.drive({ version: "v3", auth });
 
   const stream = new Readable();
@@ -221,6 +239,7 @@ async function uploadToDrive(auth, fileBuffer, fileName, fileType) {
       body: stream,
     },
     fields: "id, webViewLink",
+    supportsAllDrives: true,
   });
 
   return res.data.webViewLink || `https://drive.google.com/file/d/${res.data.id}/view`;
@@ -230,12 +249,33 @@ async function uploadToDrive(auth, fileBuffer, fileName, fileType) {
 // 5. Append to Google Sheets
 // ─────────────────────────────────────────────
 async function appendToSheet(auth, ai, driveUrl, senderEmail, fileName) {
-  const spreadsheetId = process.env.SHEET_ID;
+  const spreadsheetId = cleanGoogleId(process.env.SHEET_ID, "sheet");
   if (!spreadsheetId) {
-    throw new Error("SHEET_ID is missing in environment variables.");
+    throw new Error("SHEET_ID is missing or invalid in environment variables.");
   }
 
   const sheets = google.sheets({ version: "v4", auth });
+
+  // 5.1 Validate spreadsheet access & find exact sheet tab name
+  let targetSheetTitle = "Invoices";
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheetTitles = (meta.data.sheets || []).map((s) => s.properties.title);
+    console.log("[Sheets] Available sheets in document:", sheetTitles);
+
+    const found = sheetTitles.find((t) => t.trim().toLowerCase() === "invoices");
+    if (found) {
+      targetSheetTitle = found;
+    } else {
+      throw new Error(`Sheet tab 'Invoices' not found in spreadsheet. Available sheets: [${sheetTitles.join(", ")}]`);
+    }
+  } catch (metaErr) {
+    console.error("[Sheets] Access check failed:", metaErr.message);
+    if (metaErr.message.includes("not found") || metaErr.code === 404) {
+      throw new Error(`Google Sheets Access Error: Spreadsheet '${spreadsheetId}' not found. Please ensure the Service Account (${process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL}) is added as 'Editor' to the Sheet.`);
+    }
+    throw metaErr;
+  }
 
   const now = new Date();
   const d = String(now.getDate()).padStart(2, "0");
@@ -272,7 +312,7 @@ async function appendToSheet(auth, ai, driveUrl, senderEmail, fileName) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: "Invoices!A:BJ",
+    range: `${targetSheetTitle}!A:BJ`,
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: {
@@ -307,7 +347,7 @@ export default async function handler(req, res) {
       senderName,
       notes,
       billerEmail,
-    } = req.body;
+    } = req.body || {};
 
     if (!fileName || !fileContent) {
       return res.status(400).json({ success: false, message: "Missing fileName or fileContent." });
@@ -329,7 +369,7 @@ export default async function handler(req, res) {
       driveUrl = await uploadToDrive(auth, fileBuffer, fileName, fileType || "application/pdf");
     } catch (driveErr) {
       console.warn("Drive upload warning:", driveErr.message);
-      driveUrl = "Drive Upload Failed: " + driveErr.message;
+      driveUrl = "Drive Upload Warning: " + driveErr.message;
     }
 
     // 4. Call Gemini AI with Multi-Model & Multi-Key Failover

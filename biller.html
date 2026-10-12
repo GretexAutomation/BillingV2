@@ -3390,10 +3390,15 @@ const SubmitInvoice = {
       return;
     }
 
-    if (file.size > 10 * 1024 * 1024) {
-      Toast.error("File too large! Max 10MB");
-      return;
-    }
+    // if (file.size > 10 * 1024 * 1024) {
+    //   Toast.error("File too large! Max 10MB");
+    //   return;
+    // }
+
+    if (file.size > 20 * 1024 * 1024) {
+      Toast.error("File too large! Max 20MB");
+       return;
+      }
 
     SubmitInvoice.selectedFile = file;
 

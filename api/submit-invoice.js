@@ -217,32 +217,84 @@ IMPORTANT: For A10, A7, B3, C3 (GST/PAN numbers), return ONLY alphanumeric chara
 }
 
 // ─────────────────────────────────────────────
-// 4. Save to Google Drive
 // ─────────────────────────────────────────────
-async function uploadToDrive(auth, fileBuffer, fileName, fileType) {
-  const folderId = cleanGoogleId(process.env.UPLOAD_FOLDER_ID, "folder");
-  const drive = google.drive({ version: "v3", auth });
+// 4. Save to Google Drive (Uses Apps Script with 15GB Storage Quota)
+// ─────────────────────────────────────────────
+async function uploadToDrive(auth, fileBuffer, fileName, fileType, pureBase64) {
+  const APPS_SCRIPT_UPLOAD_URL = process.env.APPS_SCRIPT_UPLOAD_URL || "https://script.google.com/macros/s/AKfycbybJBvh412l4I32UmZVums6KiX16ckQiYHppHF0-FEwlqDF-tpyMFms0BQy7kzysX04/exec";
 
-  const stream = new Readable();
-  stream.push(fileBuffer);
-  stream.push(null);
+  // Method A: Upload via Apps Script (Runs under owner account with 15GB Drive Quota)
+  try {
+    const payload = {
+      fileName: fileName,
+      fileType: fileType || "application/pdf",
+      fileContent: pureBase64,
+      receivedFrom: "Web Upload",
+      senderName: "Biller System",
+      notes: "Auto-saved to Drive",
+    };
 
-  const requestBody = { name: fileName };
-  if (folderId) {
-    requestBody.parents = [folderId];
+    const res = await fetch(APPS_SCRIPT_UPLOAD_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      redirect: "follow",
+    });
+
+    const data = await res.json();
+    if (data && data.driveUrl) {
+      return data.driveUrl;
+    }
+
+    // Retrieve the direct webViewLink from the folder
+    const folderId = cleanGoogleId(process.env.UPLOAD_FOLDER_ID, "folder");
+    if (folderId) {
+      const drive = google.drive({ version: "v3", auth });
+      const searchRes = await drive.files.list({
+        q: `'${folderId}' in parents and name = '${fileName}' and trashed = false`,
+        orderBy: "createdTime desc",
+        pageSize: 1,
+        fields: "files(id, webViewLink)",
+        supportsAllDrives: true,
+      });
+
+      if (searchRes.data.files && searchRes.data.files.length > 0) {
+        return searchRes.data.files[0].webViewLink || `https://drive.google.com/file/d/${searchRes.data.files[0].id}/view`;
+      }
+    }
+  } catch (gasErr) {
+    console.warn("Apps Script upload attempt warning:", gasErr.message);
   }
 
-  const res = await drive.files.create({
-    requestBody,
-    media: {
-      mimeType: fileType,
-      body: stream,
-    },
-    fields: "id, webViewLink",
-    supportsAllDrives: true,
-  });
+  // Method B: Direct service account upload (fallback for Shared Drives)
+  try {
+    const folderId = cleanGoogleId(process.env.UPLOAD_FOLDER_ID, "folder");
+    const drive = google.drive({ version: "v3", auth });
 
-  return res.data.webViewLink || `https://drive.google.com/file/d/${res.data.id}/view`;
+    const stream = new Readable();
+    stream.push(fileBuffer);
+    stream.push(null);
+
+    const requestBody = { name: fileName };
+    if (folderId) {
+      requestBody.parents = [folderId];
+    }
+
+    const res = await drive.files.create({
+      requestBody,
+      media: {
+        mimeType: fileType,
+        body: stream,
+      },
+      fields: "id, webViewLink",
+      supportsAllDrives: true,
+    });
+
+    return res.data.webViewLink || `https://drive.google.com/file/d/${res.data.id}/view`;
+  } catch (directErr) {
+    console.warn("Direct Drive upload warning:", directErr.message);
+    return "N/A";
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -366,10 +418,10 @@ export default async function handler(req, res) {
     // 3. Upload File to Google Drive
     let driveUrl = "";
     try {
-      driveUrl = await uploadToDrive(auth, fileBuffer, fileName, fileType || "application/pdf");
+      driveUrl = await uploadToDrive(auth, fileBuffer, fileName, fileType || "application/pdf", pureBase64);
     } catch (driveErr) {
       console.warn("Drive upload warning:", driveErr.message);
-      driveUrl = "Drive Upload Warning: " + driveErr.message;
+      driveUrl = "N/A";
     }
 
     // 4. Call Gemini AI with Multi-Model & Multi-Key Failover

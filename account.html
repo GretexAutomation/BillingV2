@@ -1170,6 +1170,7 @@ const Dashboard = {
       const rowIdx    = item.queueRowIndex;
       const redFlags  = item["🚩 Red Flags"] || "";
       const tdsAmt    = item["B8. TDS Amount"];
+      const isBypassed = Utils.isBillBypassed(item);
       
       return `
         <tr style="cursor:pointer; ${isPending ? '' : 'opacity:0.75'}" onclick="Dashboard.openDetail(${rowIdx})">
@@ -1183,9 +1184,11 @@ const Dashboard = {
           <td>${Dashboard.queueStatusBadge(status)}</td>
           <td onclick="event.stopPropagation()">
             ${isPending
-              ? `<div style="display:flex;gap:6px;flex-wrap:wrap">
+              ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
                    <button class="queue-action-btn btn-approve" onclick="Dashboard.approveItem(${rowIdx}, '${String(item["A13. Invoice Number"] || "").replace(/'/g, "\\'")}')"><i class="fa fa-check" style="font-size:0.72rem"></i> Approve</button>
-                   <button class="queue-action-btn btn-reject" onclick="Dashboard.openRejectModal(${rowIdx}, '${String(item["A13. Invoice Number"] || "").replace(/'/g, "\\'")}')"><i class="fa fa-xmark" style="font-size:0.72rem"></i> Reject</button>
+                   ${!isBypassed 
+                     ? `<button class="queue-action-btn btn-reject" onclick="Dashboard.openRejectModal(${rowIdx}, '${String(item["A13. Invoice Number"] || "").replace(/'/g, "\\'")}')"><i class="fa fa-xmark" style="font-size:0.72rem"></i> Reject</button>`
+                     : `<span class="badge" style="background:#fff3e0;color:#e65100;font-size:0.7rem;padding:3px 6px;font-weight:600" title="Bypassed invoices can only be approved">⚡ Bypassed</span>`}
                  </div>`
               : `<span style="font-size:0.78rem;color:var(--gray-400)">${status === "Approved" ? '<i class="fa fa-check" style="color:#34a853"></i> Sent to CFO' : '<i class="fa fa-xmark" style="color:#ea4335"></i> Stopped'}</span>`}
           </td>
@@ -1282,6 +1285,11 @@ const Dashboard = {
   },
 
   openRejectModal(queueRowIndex, invoiceNo) {
+    const inv = (Dashboard.queueData || []).find(b => b.queueRowIndex === queueRowIndex) || (Dashboard.invoices || []).find(b => b.rowIndex === queueRowIndex);
+    if (inv && Utils.isBillBypassed(inv)) {
+      Toast.error("This invoice has been bypassed and can only be approved, not rejected.");
+      return;
+    }
     Dashboard.pendingRejectRow        = queueRowIndex;
     Dashboard.pendingRejectInvoiceNo = invoiceNo || "";
     document.getElementById("rejectReason").value = "";
@@ -1455,14 +1463,15 @@ const Dashboard = {
 
     const driveUrl = inv["Drive URL"];
     const driveBtn = document.getElementById("driveLink");
-    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed") {
+    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed" && driveUrl.startsWith("http")) {
       driveBtn.href = driveUrl; driveBtn.style.display = "inline-flex";
     } else { driveBtn.style.display = "none"; }
 
-    // SHOW APPROVE/REJECT BUTTONS ONLY IF PENDING AT ACCOUNT
+    // SHOW APPROVE/REJECT BUTTONS ONLY IF PENDING AT ACCOUNT (Bypassed bills can only be approved)
     const isPending = inv["Current_Stage"] === "Account";
+    const isBypassed = Utils.isBillBypassed(inv);
     document.getElementById("modalApproveBtn").style.display = isPending ? "inline-flex" : "none";
-    document.getElementById("modalRejectBtn").style.display  = isPending ? "inline-flex" : "none";
+    document.getElementById("modalRejectBtn").style.display  = (isPending && !isBypassed) ? "inline-flex" : "none";
 
     Dashboard.buildAttachmentTab(inv); 
     Dashboard.buildAccountingTab(inv); 
@@ -1494,7 +1503,7 @@ const Dashboard = {
     const driveUrl = inv["Drive URL"];
     const attachmentName = inv["Attachment Name"] || "Invoice File";
     let html = `<div style="padding:20px">`;
-    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed") {
+    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed" && driveUrl.startsWith("http")) {
       const isImage = attachmentName.toLowerCase().endsWith(".jpg") || attachmentName.toLowerCase().endsWith(".jpeg") || attachmentName.toLowerCase().endsWith(".png");
       html += `
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">

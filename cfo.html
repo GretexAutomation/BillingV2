@@ -1813,11 +1813,13 @@ const Dashboard = {
         <td><strong>${Utils.formatCurrency(item["D1. Final Payable Amt"])}</strong></td>
         <td>${item["🚩 Red Flags"] ? "🚩" : "—"}</td>
         <td>${isPending ? '<span style="background:#fff3e0;color:#f9a825;padding:4px 10px;border-radius:12px;font-size:0.75rem;font-weight:600">Pending</span>' : status}</td>
-        <td onclick="event.stopPropagation()">${isPending ? `<div style="display:flex;gap:6px">
+        <td onclick="event.stopPropagation()">${isPending ? `<div style="display:flex;gap:6px;align-items:center">
           <button class="btn btn-sm" style="background:#34a853;color:#fff;padding:4px 10px;border:none;border-radius:6px;cursor:pointer;font-size:0.72rem;font-weight:600" 
             onclick="Dashboard.openApproveModal(${rowIdx}, '${String(item["A13. Invoice Number"]||"").replace(/'/g,"\\'")}')">✅ Approve</button>
-          <button class="btn btn-sm" style="background:#ea4335;color:#fff;padding:4px 10px;border:none;border-radius:6px;cursor:pointer;font-size:0.72rem;font-weight:600"
-            onclick="Dashboard.openRejectModal(${rowIdx}, '${String(item["A13. Invoice Number"]||"").replace(/'/g,"\\'")}')">❌ Reject</button>
+          ${(!Utils.isBillBypassed(item) && item["Current_Stage"] !== "Account")
+            ? `<button class="btn btn-sm" style="background:#ea4335;color:#fff;padding:4px 10px;border:none;border-radius:6px;cursor:pointer;font-size:0.72rem;font-weight:600"
+                onclick="Dashboard.openRejectModal(${rowIdx}, '${String(item["A13. Invoice Number"]||"").replace(/'/g,"\\'")}')">❌ Reject</button>`
+            : `<span class="badge" style="background:#fff3e0;color:#e65100;font-size:0.7rem;padding:3px 6px;font-weight:600" title="Bypassed invoices can only be approved">⚡ Bypassed</span>`}
         </div>` : ""}</td>
       </tr>`;
     }).join("");
@@ -4086,14 +4088,20 @@ const Dashboard = {
 
     const driveUrl = inv["Drive URL"];
     const driveBtn = document.getElementById("driveLink");
-    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed") {
+    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed" && driveUrl.startsWith("http")) {
       driveBtn.href = driveUrl; driveBtn.style.display = "inline-flex";
     } else { driveBtn.style.display = "none"; }
 
-    // SHOW APPROVE/REJECT BUTTONS ONLY IF AT CFO OR ACCOUNT (for bypass)
-    const isPending = inv["Current_Stage"] === "CFO" || inv["Current_Stage"] === "Account";
-    document.getElementById("modalApproveBtn").style.display = isPending ? "inline-flex" : "none";
-    document.getElementById("modalRejectBtn").style.display  = isPending ? "inline-flex" : "none";
+    // SHOW APPROVE/REJECT BUTTONS:
+    // If at Account (Bypass mode) or already bypassed, CFO can ONLY approve, NOT reject!
+    const isAtCfo = inv["Current_Stage"] === "CFO";
+    const isAtAccount = inv["Current_Stage"] === "Account";
+    const isBypassed = Utils.isBillBypassed(inv);
+    const canApprove = isAtCfo || isAtAccount;
+    const canReject = isAtCfo && !isBypassed && !isAtAccount;
+
+    document.getElementById("modalApproveBtn").style.display = canApprove ? "inline-flex" : "none";
+    document.getElementById("modalRejectBtn").style.display  = canReject ? "inline-flex" : "none";
 
     Dashboard.buildAttachmentTab(inv); 
     Dashboard.buildAccountingTab(inv); 
@@ -4130,7 +4138,7 @@ const Dashboard = {
     const driveUrl = inv["Drive URL"];
     const attachmentName = inv["Attachment Name"] || "Invoice File";
     let html = `<div style="padding:20px">`;
-    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed") {
+    if (driveUrl && driveUrl !== "N/A" && driveUrl !== "Upload Failed" && driveUrl.startsWith("http")) {
       const isImage = attachmentName.toLowerCase().endsWith(".jpg") || attachmentName.toLowerCase().endsWith(".jpeg") || attachmentName.toLowerCase().endsWith(".png");
       html += `
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -4292,6 +4300,11 @@ const Dashboard = {
   },
 
   openRejectModal(rowIdx, invoiceNo) {
+    const inv = (Dashboard.queueData || []).find(b => b.queueRowIndex === rowIdx || b.rowIndex === rowIdx) || (Dashboard.allInvoicesData || []).find(b => b.rowIndex === rowIdx);
+    if (inv && (inv["Current_Stage"] === "Account" || Utils.isBillBypassed(inv))) {
+      Toast.error("This invoice is in Bypass mode and can only be approved, not rejected.");
+      return;
+    }
     Dashboard.pendingRejectRow = rowIdx;
     Dashboard.pendingRejectInvoiceNo = invoiceNo;
     document.getElementById("rejectModalInvoiceNo").textContent = invoiceNo ? `— ${invoiceNo}` : "";

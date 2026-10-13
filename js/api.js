@@ -746,6 +746,18 @@ const Utils = {
       ${config.icon} ${status || "N/A"}</span>`;
   },
 
+  isBillBypassed(inv) {
+    if (!inv) return false;
+    if (inv.isBypassed === true) return true;
+    const checkFields = [
+      inv["Account_Status"], inv["CFO_Status"], inv["Admin_Status"], inv["SA_Status"],
+      inv["Approval Status"], inv["Current_Stage"],
+      inv["Account_Remark"], inv["CFO_Remark"], inv["Admin_Remark"], inv["SA_Remark"],
+      inv["Notes"], inv["Review Notes"]
+    ];
+    return checkFields.some(f => String(f || "").toLowerCase().includes("bypass"));
+  },
+
   roleBadge(role) {
     return `<span class="role-badge role-${role}">${role}</span>`;
   },

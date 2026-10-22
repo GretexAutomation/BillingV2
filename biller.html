@@ -3423,7 +3423,7 @@ const SubmitInvoice = {
     return true;
   },
 
-// async submitForm() {
+/* DEPRECATED_SUBMIT_HANDLERS
 //     // Basic form validation
 //     if (!SubmitInvoice.validateForm()) {
 //       console.error("Validation failed: Required fields missing");
@@ -3486,7 +3486,7 @@ const SubmitInvoice = {
 //         // Dashboard section par wapas bhejna aur list refresh karna
 //         if (typeof Dashboard !== 'undefined' && Dashboard.showSection) {
 //           Dashboard.showSection("invoices");
-//           Dashboard.loadQueue(); 
+//  
 //         }
 //       }, 3000);
 
@@ -3497,12 +3497,13 @@ const SubmitInvoice = {
 //       Toast.error("Network issue: Please check your connection.");
 //       SubmitInvoice.showStatus("error", "Fatal Error: " + error.message);
 //     }
-//   },
+*/
 
-// async submitForm() {
+/* DEPRECATED_SUBMIT_HANDLERS
 //     // Validate form inputs before submission
 //     if (!SubmitInvoice.validateForm()) {
 //       console.error("Validation Error: Mandatory fields are missing.");
+// submitBtn reset removed
 //       return;
 //     }
 
@@ -3563,7 +3564,7 @@ const SubmitInvoice = {
 //         hideProcessingScreen();
 //         if (typeof Dashboard !== 'undefined' && Dashboard.showSection) {
 //           Dashboard.showSection("invoices");
-//           Dashboard.loadQueue(); 
+//  
 //         }
 //       }, 2500);
 
@@ -3574,12 +3575,25 @@ const SubmitInvoice = {
 //       Toast.error(error.message || "Unable to connect to the processing server.");
 //       SubmitInvoice.showStatus("error", "System Error: " + (error.message || "Network issue"));
 //     }
-//   },
+*/
 
-async submitForm() {
+  isSubmitting: false,
+
+  async submitForm() {
+    if (SubmitInvoice.isSubmitting) {
+      console.warn("Submission already in progress. Ignoring duplicate click.");
+      return;
+    }
+    const submitBtn = document.querySelector("#section-submit button.btn-primary");
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Submitting...';
+    }
+    SubmitInvoice.isSubmitting = true;
     // Validate form inputs before submission
     if (!SubmitInvoice.validateForm()) {
       console.error("Validation Error: Mandatory fields are missing.");
+// submitBtn reset removed
       return;
     }
 
@@ -3648,7 +3662,7 @@ async submitForm() {
         hideProcessingScreen();
         if (typeof Dashboard !== 'undefined' && Dashboard.showSection) {
           Dashboard.showSection("invoices");
-          Dashboard.loadQueue(); 
+ 
         }
       }, 2500);
 
@@ -3657,6 +3671,13 @@ async submitForm() {
       console.error("Submission Error:", error);
       Toast.error(error.message || "Failed to process invoice. Please try again.");
       SubmitInvoice.showStatus("error", "Error: " + (error.message || "Network issue"));
+    } finally {
+      SubmitInvoice.isSubmitting = false;
+      const submitBtn = document.querySelector("#section-submit button.btn-primary");
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fa fa-paper-plane"></i> Submit & Process';
+      }
     }
   },
 

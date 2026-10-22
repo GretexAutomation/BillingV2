@@ -226,6 +226,8 @@ async function uploadToDrive(auth, fileBuffer, fileName, fileType, pureBase64) {
   // Method A: Upload via Apps Script (Runs under owner account with 15GB Drive Quota)
   try {
     const payload = {
+      action: "uploadOnly",
+      uploadOnly: true,
       fileName: fileName,
       fileType: fileType || "application/pdf",
       fileContent: pureBase64,

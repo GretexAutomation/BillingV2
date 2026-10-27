@@ -218,12 +218,44 @@ IMPORTANT: For A10, A7, B3, C3 (GST/PAN numbers), return ONLY alphanumeric chara
 
 // ─────────────────────────────────────────────
 // ─────────────────────────────────────────────
-// 4. Save to Google Drive (Uses Apps Script with 15GB Storage Quota)
+// 4. Save to Google Drive
 // ─────────────────────────────────────────────
 async function uploadToDrive(auth, fileBuffer, fileName, fileType, pureBase64) {
-  const APPS_SCRIPT_UPLOAD_URL = process.env.APPS_SCRIPT_UPLOAD_URL || "https://script.google.com/macros/s/AKfycbybJBvh412l4I32UmZVums6KiX16ckQiYHppHF0-FEwlqDF-tpyMFms0BQy7kzysX04/exec";
+  // Method A: Direct service account upload (primary - eliminates duplicate sheet appends)
+  try {
+    const folderId = cleanGoogleId(process.env.UPLOAD_FOLDER_ID, "folder");
+    const drive = google.drive({ version: "v3", auth });
 
-  // Method A: Upload via Apps Script (Runs under owner account with 15GB Drive Quota)
+    const stream = new Readable();
+    stream.push(fileBuffer);
+    stream.push(null);
+
+    const requestBody = { name: fileName };
+    if (folderId) {
+      requestBody.parents = [folderId];
+    }
+
+    const res = await drive.files.create({
+      requestBody,
+      media: {
+        mimeType: fileType,
+        body: stream,
+      },
+      fields: "id, webViewLink",
+      supportsAllDrives: true,
+    });
+
+    if (res.data && (res.data.webViewLink || res.data.id)) {
+      const link = res.data.webViewLink || `https://drive.google.com/file/d/${res.data.id}/view`;
+      console.log("[Drive] Direct upload successful:", link);
+      return link;
+    }
+  } catch (directErr) {
+    console.warn("[Drive] Direct upload attempt failed, falling back to Apps Script:", directErr.message);
+  }
+
+  // Method B: Fallback via Apps Script (Runs under owner account with 15GB Drive Quota)
+  const APPS_SCRIPT_UPLOAD_URL = process.env.APPS_SCRIPT_UPLOAD_URL || "https://script.google.com/macros/s/AKfycbybJBvh412l4I32UmZVums6KiX16ckQiYHppHF0-FEwlqDF-tpyMFms0BQy7kzysX04/exec";
   try {
     const payload = {
       action: "uploadOnly",
@@ -265,42 +297,14 @@ async function uploadToDrive(auth, fileBuffer, fileName, fileType, pureBase64) {
       }
     }
   } catch (gasErr) {
-    console.warn("Apps Script upload attempt warning:", gasErr.message);
+    console.warn("[Drive] Apps Script upload attempt warning:", gasErr.message);
   }
 
-  // Method B: Direct service account upload (fallback for Shared Drives)
-  try {
-    const folderId = cleanGoogleId(process.env.UPLOAD_FOLDER_ID, "folder");
-    const drive = google.drive({ version: "v3", auth });
-
-    const stream = new Readable();
-    stream.push(fileBuffer);
-    stream.push(null);
-
-    const requestBody = { name: fileName };
-    if (folderId) {
-      requestBody.parents = [folderId];
-    }
-
-    const res = await drive.files.create({
-      requestBody,
-      media: {
-        mimeType: fileType,
-        body: stream,
-      },
-      fields: "id, webViewLink",
-      supportsAllDrives: true,
-    });
-
-    return res.data.webViewLink || `https://drive.google.com/file/d/${res.data.id}/view`;
-  } catch (directErr) {
-    console.warn("Direct Drive upload warning:", directErr.message);
-    return "N/A";
-  }
+  return "N/A";
 }
 
 // ─────────────────────────────────────────────
-// 5. Append to Google Sheets
+// 5. Append to Google Sheets (with Smart Deduplication)
 // ─────────────────────────────────────────────
 async function appendToSheet(auth, ai, driveUrl, senderEmail, fileName) {
   const spreadsheetId = cleanGoogleId(process.env.SHEET_ID, "sheet");
@@ -364,15 +368,59 @@ async function appendToSheet(auth, ai, driveUrl, senderEmail, fileName) {
     clean(ai.overallStatus), "New"
   ];
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${targetSheetTitle}!A:BJ`,
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: [row],
-    },
-  });
+  // 5.2 Deduplication Guard: Check if an entry for this file/driveUrl was already created
+  let existingRowIndex = -1;
+  try {
+    const existingDataRes = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${targetSheetTitle}!A:F`,
+    });
+    const rows = existingDataRes.data.values || [];
+    // Scan only recent rows (last 20)
+    const scanLimit = Math.max(1, rows.length - 20);
+    for (let r = rows.length - 1; r >= scanLimit; r--) {
+      const rFile = (rows[r][3] || "").toString().trim().toLowerCase();
+      const rDrive = (rows[r][4] || "").toString().trim();
+      const rColF = (rows[r][5] || "").toString().trim();
+      
+      const matchDrive = driveUrl && driveUrl !== "N/A" && rDrive && (rDrive === driveUrl || rDrive.includes(driveUrl) || driveUrl.includes(rDrive));
+      // matchFile is valid if driveUrl matches, or if column F (first AI field) is still blank/empty
+      const matchFile = fileName && rFile && rFile === fileName.trim().toLowerCase() && (!rColF || rColF === "N/A");
+
+      if (matchDrive || matchFile) {
+        existingRowIndex = r + 1; // 1-indexed sheet row
+        console.log(`[Sheets] Existing row found at row ${existingRowIndex} for '${fileName}'. Updating to prevent duplicate.`);
+        break;
+      }
+    }
+  } catch (scanErr) {
+    console.warn("[Sheets] Scan existing rows warning:", scanErr.message);
+  }
+
+  if (existingRowIndex > 1) {
+    // UPDATE the existing row so no duplicate is created
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${targetSheetTitle}!A${existingRowIndex}:BJ${existingRowIndex}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [row],
+      },
+    });
+    console.log(`[Sheets] Successfully updated row ${existingRowIndex} with full AI data.`);
+  } else {
+    // Append as a new row
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${targetSheetTitle}!A:BJ`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: [row],
+      },
+    });
+    console.log(`[Sheets] Successfully appended new row to ${targetSheetTitle}.`);
+  }
 }
 
 // ─────────────────────────────────────────────

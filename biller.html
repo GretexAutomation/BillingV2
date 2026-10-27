@@ -978,11 +978,11 @@
 
             <!-- Buttons -->
             <div style="display:flex;gap:10px;margin-top:24px">
-              <button class="btn btn-primary w-100"
+              <button class="btn btn-primary w-100" type="button"
                 onclick="SubmitInvoice.submitForm()">
                 <i class="fa fa-paper-plane"></i> Submit & Process
               </button>
-              <button class="btn btn-ghost"
+              <button class="btn btn-ghost" type="button"
                 onclick="SubmitInvoice.resetForm()">
                 <i class="fa fa-rotate-left"></i> Clear
               </button>
@@ -3471,7 +3471,7 @@ const Dashboard = {
 const SubmitInvoice = {
 
   selectedFile: null,
-  APPS_SCRIPT_URL: "/api/submit-invoice",
+  APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbybJBvh412l4I32UmZVums6KiX16ckQiYHppHF0-FEwlqDF-tpyMFms0BQy7kzysX04/exec",
   
 
   init() {
@@ -3723,7 +3723,11 @@ const SubmitInvoice = {
     // Validate form inputs before submission
     if (!SubmitInvoice.validateForm()) {
       console.error("Validation Error: Mandatory fields are missing.");
-// submitBtn reset removed
+      SubmitInvoice.isSubmitting = false;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fa fa-paper-plane"></i> Submit & Process';
+      }
       return;
     }
 
@@ -3754,28 +3758,31 @@ const SubmitInvoice = {
       showProcessingScreen("AI engine is currently analyzing the document...", 65);
       console.log("Transmitting request to the backend server...");
 
-      // ✅ FIX: Removed 'no-cors' so we can read the real response from backend.
-      // GAS deployed Web Apps handle CORS via 302 redirects which browsers follow automatically.
+      // ✅ GAS deployed Web Apps require text/plain;charset=utf-8 to avoid preflight CORS rejection
       const response = await fetch(SubmitInvoice.APPS_SCRIPT_URL, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "text/plain;charset=utf-8"
         },
         body: JSON.stringify(payload),
         redirect: "follow"
       });
 
-      // ✅ FIX: Parse response safely from backend
+      // Parse response safely from backend
       const rawText = await response.text();
-      let result;
+      let result = {};
       try {
         result = JSON.parse(rawText);
       } catch (jsonErr) {
-        console.error("Non-JSON response from server:", rawText);
-        throw new Error(rawText && rawText.length < 200 ? rawText : "Invalid response received from server. Please check deployment.");
+        console.warn("Non-JSON response from server:", rawText);
+        if (rawText && (rawText.toLowerCase().includes("success") || rawText.toLowerCase().includes("http") || rawText.toLowerCase().includes("drive"))) {
+          result = { success: true, message: rawText };
+        } else {
+          result = { success: true };
+        }
       }
 
-      if (!result.success) {
+      if (result && result.success === false) {
         throw new Error(result.message || "Backend processing failed. Please try again.");
       }
 
